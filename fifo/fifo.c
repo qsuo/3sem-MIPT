@@ -57,8 +57,12 @@ int sender(const char* file)
     sprintf(receiverName, "%d.fifo", receiverPid);
     mkfifo(receiverName, 0666);
 
+    errno = 0;
     int receiverFifo = open(receiverName, O_WRONLY | O_NONBLOCK);
-        
+    if(receiverFifo == -1)
+        perror("open write nonblock");
+
+
     deleteNonBlock(receiverFifo);
 
     //write(receiverFifo, "I", 1);
@@ -93,17 +97,18 @@ exit:
 
 int receiver()
 {
+
     int myPid = getpid();
     char myName[SIZENAME] = {};
     sprintf(myName, "%d.fifo", myPid);
+    mkfifo(myName, 0666);
+    int myFifo = open(myName, O_RDONLY | O_NONBLOCK);
 
     mkfifo(FIFO, 0666);
     int fifo = open(FIFO, O_WRONLY);
     write(fifo, &myPid, sizeof(myPid));
 
-    mkfifo(myName, 0666);
-    int myFifo = open(myName, O_RDONLY | O_NONBLOCK);
-
+    
     usleep(SLEEPTIME);
     deleteNonBlock(myFifo); 
 
