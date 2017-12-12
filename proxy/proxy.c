@@ -50,6 +50,8 @@ long handle(int argc, char* argv[], int* fd)
 
 typedef struct connection_s
 {
+    int fdIn[2];
+    int fdOut[2];
     int rpipe; 
     int wpipe;
     size_t size;
@@ -63,15 +65,18 @@ typedef struct channel_s
     char buf[CBUFSIZE];
 } channel_t;
 
-typedef struct server_s
+/*typedef struct server_s
 {
+    int who;
+    int inpipe[2];
+    int outpipe[2];
     long n;
     connection_t** connection;
     channel_t channel;
-} server_t;
+} server_t;*/
 
 
-/*connection_t* createConnection(size_t size, int rpipe, int wpipe)
+connection_t* createConnection(size_t size, int rpipe, int wpipe)
 {
     connection_t* this= (connection_t*) calloc(1, sizeof(connection_t));
     if(this == NULL)
@@ -86,9 +91,9 @@ typedef struct server_s
         return NULL;
 
     return this;
-}*/
+}
 
-/*int deleteConnection(connection_t* this)
+int deleteConnection(connection_t* this)
 {
     this->size = 0;
     this->rpipe = 0;
@@ -98,7 +103,7 @@ typedef struct server_s
     free(this);
     this = NULL;
     return 0;
-}*/
+}
 
 
 int dumpConnection(connection_t* this)
@@ -121,13 +126,73 @@ int initChannel(channel_t* this, int readFd, int writeFd)
     return 0;
 }
 
-enum file_d
+enum
 {
     R = 0,
     W
 };
 
-server_t* createServer(long n, int fileFd)
+int deleteServerConnection(server_t* this, long n)
+{
+    if(this == NULL)
+        return -1;
+
+    long i;
+    for(i = 0; i < n; i++)
+    {
+        free(this->connection[i]->buf);
+        this->connection[i]->buf = NULL;
+        free(this->connection[i]);
+        this->connection[i] = NULL;
+    }
+
+    free(this->connection);
+    this->connection = NULL;
+
+}
+
+
+int deleteServer(server_t* this)
+{
+    if (this == NULL)
+        return -1;
+
+
+    //if(this->connection == NULL)
+     //   goto dserver;//just for not copypast
+    
+    long i;
+    for(i = 0; i < this->n; i++)
+    {
+        /*if(this->connection[i] == NULL)
+            continue;*/
+
+        this->connection[i]->size = 0;
+        this->connection[i]->rpipe = -1;
+        this->connection[i]->wpipe = -1;
+        free(this->connection[i]->buf);
+        this->connection[i]->buf = NULL;
+
+        free(this->connection[i]);
+        this->connection[i] = NULL;
+    }
+
+    free(this->connection);
+    this->connection = NULL;
+
+dserver:
+    this->channel.readFd = -1;
+    this->channel.writeFd = -1;
+
+    this->n = 0;
+
+    free(this);
+    this == NULL;
+
+    return 0;
+}
+
+int initServer(long n, int fileFd)
 {
     server_t* server = (server_t*) calloc(1, sizeof(server_t));
     if(server == NULL)
@@ -139,10 +204,65 @@ server_t* createServer(long n, int fileFd)
 
     server->connection = (connection_t**) calloc(n, sizeof(connection_t*));
     if(server->connection == NULL)
+    {
+        deleteServer(server);
         return NULL;
+    }
+
+    int* inpipes[2] = (int*) calloc(n, sizeof(int));
+    int* outpipes[2] = (int*) calloc(n, sizeof(int));
+
+
+    long i;
+    for(i = 0; i < n; i++)
+    {
+        /*int fdIn[2];
+        int fdOut[2];*/
+
+        pipe(inpipes[i]);
+        pipe(outpipes[i]);
+
+       
+        pid_t pid = fork();
+
+        /*server->inpipe[R] = fdIn[R];
+        server->inpipe[W] = fdIn[W];
+        server->outpipe[R] = fdOut[R];
+        server->outpipe[W] = fdOut[W];*/
+
+
+        if(pid == 0)
+        {
+            close(inpipes[i][W]);
+            close(outpipes[i][R]);
+
+            if(i == 0)
+            {
+                initChannel(&(server->channel), fileFd, outpipes[i][W]);
+                close(inpipes[i][R]);
+            }
+            
+            if(0 < i && i < n - 1)
+            {
+                initChannel(&(server->channel), inpipes[i][R], outpipes[i][W]);
+            }
+
+            if(i == n -1)
+            {
+                initChannel(&(server->channel), inpipes[i][R], STDOUT_FILENO);
+                close(outpipes[i][W]);
+            }
+
+        }
+    }
+
+    for(i = 0; i < n; i++)
+    {
+        
+    }
 
     
-    long i;
+    /*long i;
     for(i = 0; i < n; i++)
     {
         int fdIn[2];
@@ -175,6 +295,13 @@ server_t* createServer(long n, int fileFd)
                 initChannel(&(server->channel), fdIn[R], STDOUT_FILENO);
                 close(fdOut[W]);
             }
+
+            deleteServerConnection(server, i);
+            free(server->connection);
+            server->connection = NULL;
+
+            break;
+
         }
 
         if(pid > 0)
@@ -186,11 +313,23 @@ server_t* createServer(long n, int fileFd)
             {
                 server->connection[i - 1]->wpipe = fdIn[W];
                 close(fdOut[R]);
+                break;
             }
 
             server->connection[i] = (connection_t*) calloc(1, sizeof(connection_t));
+            if(server->connection[i] == NULL)
+            {
+                deleteServer(server);
+                return NULL;
+            }
+
             server->connection[i]->size = size;
             server->connection[i]->buf = (char*) calloc(size, sizeof(char));
+            if(server->connection[i]->buf == NULL)
+            {
+                deleteServer(server);
+                return NULL;
+            }
                 
 
             if(i == 0)
@@ -204,15 +343,17 @@ server_t* createServer(long n, int fileFd)
                 server->connection[i]->rpipe = fdOut[R];
                 server->connection[i-1]->wpipe = fdIn[W];
             }
-
+            
         }
 
         size /= 3;
 
-    }
-    
+    }*/
 
+    return server;
 }
+
+
 
 
 int main(int argc, char* argv[])
@@ -220,6 +361,11 @@ int main(int argc, char* argv[])
     int fd = 0;
     long n = handle(argc, argv, &fd);
 
+    
+
+    //printf("%d\n", ret);
+
+    close(fd);
     return 0;
 }
 
