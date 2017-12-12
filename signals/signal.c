@@ -87,7 +87,6 @@ int child(const char* file, pid_t ppid)
     sigfillset(&waitMask);
     sigdelset(&waitMask, SIGUSR1);
     sigdelset(&waitMask, SIGALRM);
-    sigdelset(&waitMask, SIGINT);
 
 
     char buf[BUFSIZE];
@@ -165,7 +164,6 @@ int parent()
     sigdelset(&waitMask, SIGUSR1);
     sigdelset(&waitMask, SIGUSR2);
     sigdelset(&waitMask, SIGCHLD);
-    sigdelset(&waitMask, SIGINT);
 
 
     while(1)
@@ -197,8 +195,9 @@ int main(int argc, char* argv[])
     sigaddset(&mainMask, SIGUSR1);
     sigaddset(&mainMask, SIGUSR2);
     sigaddset(&mainMask, SIGCHLD);
-    sigprocmask(SIG_BLOCK, &mainMask, NULL);
 
+    
+    sigprocmask(SIG_BLOCK, &mainMask, NULL);
     cpid = fork();
 
 

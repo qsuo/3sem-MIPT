@@ -57,15 +57,12 @@ int sender(const char* file)
     sprintf(receiverName, "%d.fifo", receiverPid);
     mkfifo(receiverName, 0666);
 
-    errno = 0;
     int receiverFifo = open(receiverName, O_WRONLY | O_NONBLOCK);
-    if(receiverFifo == -1)
-        perror("open write nonblock");
 
 
     deleteNonBlock(receiverFifo);
 
-    //write(receiverFifo, "I", 1);
+    write(receiverFifo, "I", 1);
 
     char buf[BUFSIZE] = {};
     ssize_t count = 0;
@@ -75,7 +72,7 @@ int sender(const char* file)
         int written = write(receiverFifo, buf, count);
         if(written != count)
         {
-            fprintf(stderr, "Write error\n\n\n");
+            fprintf(stderr, "Write error\n");
             goto write;
         }
     }
@@ -97,41 +94,44 @@ exit:
 
 int receiver()
 {
-
+    
     int myPid = getpid();
     char myName[SIZENAME] = {};
     sprintf(myName, "%d.fifo", myPid);
     mkfifo(myName, 0666);
     int myFifo = open(myName, O_RDONLY | O_NONBLOCK);
 
+    
     mkfifo(FIFO, 0666);
     int fifo = open(FIFO, O_WRONLY);
     write(fifo, &myPid, sizeof(myPid));
-
+    
+    
     
     usleep(SLEEPTIME);
+    
     deleteNonBlock(myFifo); 
 
     char buf[BUFSIZE] = {};
 
 
     
-    /*if(read(myFifo, buf, 1) == 0)
+    if(read(myFifo, buf, 1) == 0)
     {
         fprintf(stderr, "Sender terminated or is busy\n");
         goto exit;
-    }*/
+    }
 
     ssize_t count = 0;
     while((count = read(myFifo, buf, BUFSIZE)) > 0)
     {
 
-        write(STDOUT_FILENO, buf, count);
-        /*if(written != count)
+        int written = write(STDOUT_FILENO, buf, count);
+        if(written != count)
         {
-            //fprintf(stderr, "err\n");
+            fprintf(stderr, "err\n");
             goto exit;
-        }*/
+        }
     }
 
 exit:
