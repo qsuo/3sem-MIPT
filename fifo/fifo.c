@@ -123,7 +123,7 @@ int receiver()
     }
 
     ssize_t count = 0;
-    while((count = read(myFifo, buf, BUFSIZE)) > 0)
+    while((count = read(myFifo, buf, BUFSIZE/2)) > 0)
     {
 
         int written = write(STDOUT_FILENO, buf, count);

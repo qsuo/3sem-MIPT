@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <assert.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
@@ -8,8 +9,43 @@
 #include <sys/stat.h>
 #include <string.h>
 #include <math.h>
+#include <sys/select.h>
 
-#define CBUFSIZE 128 * 1024
+
+#define BUFSIZE 128 * 1024
+
+const long MB1 = 1024*1024;
+
+enum
+{
+    R = 0,
+    W,
+};
+
+enum
+{
+    CHILD,
+    PARENT
+};
+
+const int CLOSED = -1;
+
+
+long min(long a, long b)
+{
+    if(a < b)
+        return a;
+    else
+        return b;
+}
+
+long max(long a, long b)
+{
+    if(a > b)
+        return a;
+    else
+        return b;
+}
 
 int error(const char* msg)
 {
@@ -44,329 +80,426 @@ long handle(int argc, char* argv[], int* fd)
     if((endptr == str) || (*endptr != '\0'))
         error(usage);
 
+    if(value <= 1)
+        error("Must be more than 1 intermediaies");
+
     return value;
 }
 
-
-typedef struct connection_s
-{
-    int fdIn[2];
-    int fdOut[2];
-    int rpipe; 
-    int wpipe;
-    size_t size;
-    char* buf;
-} connection_t;
-
 typedef struct channel_s
 {
-    int readFd;
-    int writeFd;
-    char buf[CBUFSIZE];
+    int rfd;
+    int wfd;
+    size_t size;
+    char* buf;
+    int current;
+    char* start;
 } channel_t;
 
-/*typedef struct server_s
-{
-    int who;
-    int inpipe[2];
-    int outpipe[2];
-    long n;
-    connection_t** connection;
-    channel_t channel;
-} server_t;*/
 
-
-connection_t* createConnection(size_t size, int rpipe, int wpipe)
+channel_t* createChannel(int rfd, int wfd, size_t size)
 {
-    connection_t* this= (connection_t*) calloc(1, sizeof(connection_t));
+    channel_t* this = (channel_t*) calloc(1, sizeof(channel_t));
     if(this == NULL)
         return NULL;
 
     this->size = size;
-    this->rpipe = rpipe;
-    this->wpipe = wpipe;
+    this->rfd = rfd;
+    this->wfd = wfd;
+    this->current = 0;
 
     this->buf = (char*) calloc(size, sizeof(char));
     if(this->buf == NULL)
+    {
+        free(this);
         return NULL;
+    }
 
+    this->start = this->buf;
     return this;
+
 }
 
-int deleteConnection(connection_t* this)
+int deleteChannel(channel_t* this)
 {
+    assert(this != NULL);
+
     this->size = 0;
-    this->rpipe = 0;
-    this->wpipe = 0;
+
+    close(this->rfd);
+    close(this->wfd);
+    
+    this->rfd = CLOSED;
+    this->wfd = CLOSED;
+
+    
     free(this->buf);
     this->buf = NULL;
-    free(this);
-    this = NULL;
     return 0;
+
 }
 
-
-int dumpConnection(connection_t* this)
+typedef struct dealer_s
 {
-    printf("-------------\n");
-    printf  ("size = %lu\n"
-            "rpipe = %d\n"
-            "wpipe = %d\n"
-            "buf = %p\n",
-            this->size, this->rpipe, this->wpipe, this->buf);
-    printf("-------------\n");
-    return 0;
-}
+    int rfd;
+    int wfd;
+} dealer_t;
 
-int initChannel(channel_t* this, int readFd, int writeFd)
+
+typedef struct server_s
 {
-    this->readFd;
-    this->writeFd;
+    int mode;
+    int fileFd;
+    long n;
 
-    return 0;
-}
+    int maxfd;
 
-enum
+    dealer_t dealer;
+    channel_t* channel;
+
+} server_t;
+
+
+server_t* createServer(long n, int fileFd)
 {
-    R = 0,
-    W
-};
-
-int deleteServerConnection(server_t* this, long n)
-{
+    server_t* this = (server_t*) calloc(1, sizeof(server_t));
     if(this == NULL)
-        return -1;
-
-    long i;
-    for(i = 0; i < n; i++)
-    {
-        free(this->connection[i]->buf);
-        this->connection[i]->buf = NULL;
-        free(this->connection[i]);
-        this->connection[i] = NULL;
-    }
-
-    free(this->connection);
-    this->connection = NULL;
-
-}
-
-
-int deleteServer(server_t* this)
-{
-    if (this == NULL)
-        return -1;
-
-
-    //if(this->connection == NULL)
-     //   goto dserver;//just for not copypast
-    
-    long i;
-    for(i = 0; i < this->n; i++)
-    {
-        /*if(this->connection[i] == NULL)
-            continue;*/
-
-        this->connection[i]->size = 0;
-        this->connection[i]->rpipe = -1;
-        this->connection[i]->wpipe = -1;
-        free(this->connection[i]->buf);
-        this->connection[i]->buf = NULL;
-
-        free(this->connection[i]);
-        this->connection[i] = NULL;
-    }
-
-    free(this->connection);
-    this->connection = NULL;
-
-dserver:
-    this->channel.readFd = -1;
-    this->channel.writeFd = -1;
-
-    this->n = 0;
-
-    free(this);
-    this == NULL;
-
-    return 0;
-}
-
-int initServer(long n, int fileFd)
-{
-    server_t* server = (server_t*) calloc(1, sizeof(server_t));
-    if(server == NULL)
         return NULL;
 
-    double dsize = 512 * pow(3, n);
+    this->n = n;
+    this->fileFd = fileFd;
 
-    int size = (int) dsize;
+    int success = 1;
 
-    server->connection = (connection_t**) calloc(n, sizeof(connection_t*));
-    if(server->connection == NULL)
+    long i = 0;
+    int maxfd = -1;
+
+    this->channel = (channel_t*) calloc(n - 1, sizeof(channel_t));
+    if(this->channel == NULL)
     {
-        deleteServer(server);
-        return NULL;
+        fprintf(stderr, "Channels error calloc\n");
+        goto channelCallocError;
     }
 
-    int* inpipes[2] = (int*) calloc(n, sizeof(int));
-    int* outpipes[2] = (int*) calloc(n, sizeof(int));
+    int in[2];
+    int out[2];
 
 
-    long i;
     for(i = 0; i < n; i++)
     {
-        /*int fdIn[2];
-        int fdOut[2];*/
+        int r1 = pipe(in);
+        int r2 = pipe(out);
 
-        pipe(inpipes[i]);
-        pipe(outpipes[i]);
+        if(r1 == -1 || r2 == -1)
+        {
+            fprintf(stderr,"Pipe error\n");
+            goto pipeError;
+        }
 
-       
+
         pid_t pid = fork();
-
-        /*server->inpipe[R] = fdIn[R];
-        server->inpipe[W] = fdIn[W];
-        server->outpipe[R] = fdOut[R];
-        server->outpipe[W] = fdOut[W];*/
-
+    
+        if(pid == -1)
+        {
+            fprintf(stderr, "Fork error\n");
+            goto forkError;
+        }
 
         if(pid == 0)
         {
-            close(inpipes[i][W]);
-            close(outpipes[i][R]);
+            long j;
+            for(j = 0; j < i; j++)
+            {
+                close(this->channel[j].rfd);
+                close(this->channel[j].wfd);
+            }
+
+
+            close(in[W]);
+            close(out[R]);
+
 
             if(i == 0)
             {
-                initChannel(&(server->channel), fileFd, outpipes[i][W]);
-                close(inpipes[i][R]);
-            }
-            
-            if(0 < i && i < n - 1)
-            {
-                initChannel(&(server->channel), inpipes[i][R], outpipes[i][W]);
-            }
-
-            if(i == n -1)
-            {
-                initChannel(&(server->channel), inpipes[i][R], STDOUT_FILENO);
-                close(outpipes[i][W]);
-            }
-
-        }
-    }
-
-    for(i = 0; i < n; i++)
-    {
-        
-    }
-
-    
-    /*long i;
-    for(i = 0; i < n; i++)
-    {
-        int fdIn[2];
-        int fdOut[2];
-
-        pipe(fdIn);
-        pipe(fdOut);
-
-        pid_t pid = fork();
-
+                this->dealer.rfd = fileFd;
+                this->dealer.wfd = out[W];
                 
-        if(pid == 0)
-        {
-            close(fdIn[W]);
-            close(fdOut[R]);
-
-            if(i == 0)
-            {
-                initChannel(&(server->channel), fileFd, fdOut[W]);
-                close(fdIn[R]);
+                close(in[R]);
             }
-            
+
             if(0 < i && i < n - 1)
             {
-                initChannel(&(server->channel), fdIn[R], fdOut[W]);
+                this->dealer.rfd = in[R];
+                this->dealer.wfd = out[W];
             }
-
-            if(i == n -1)
-            {
-                initChannel(&(server->channel), fdIn[R], STDOUT_FILENO);
-                close(fdOut[W]);
-            }
-
-            deleteServerConnection(server, i);
-            free(server->connection);
-            server->connection = NULL;
-
-            break;
-
-        }
-
-        if(pid > 0)
-        {
-            close(fdIn[R]);
-            close(fdOut[W]);
 
             if(i == n - 1)
             {
-                server->connection[i - 1]->wpipe = fdIn[W];
-                close(fdOut[R]);
-                break;
-            }
+                this->dealer.rfd = in[R];
+                this->dealer.wfd = STDOUT_FILENO;
 
-            server->connection[i] = (connection_t*) calloc(1, sizeof(connection_t));
-            if(server->connection[i] == NULL)
-            {
-                deleteServer(server);
-                return NULL;
+                close(out[W]);
             }
+        
+            this->mode = CHILD;
 
-            server->connection[i]->size = size;
-            server->connection[i]->buf = (char*) calloc(size, sizeof(char));
-            if(server->connection[i]->buf == NULL)
-            {
-                deleteServer(server);
-                return NULL;
-            }
-                
+            return this;
+        }
+
+
+        if(pid > 0)
+        {
+            
+            this->mode = PARENT;
+            
+            close(in[R]);
+            close(out[W]);
+
+            maxfd = max(maxfd, out[R]);
+            maxfd = max(maxfd, in[W]);
+
+            fcntl(out[R], F_SETFL, O_RDONLY | O_NONBLOCK);
+            fcntl(in[W], F_SETFL, O_WRONLY | O_NONBLOCK);
+
 
             if(i == 0)
             {
-                server->connection[i]->rpipe = fdOut[R];
-                close(fdIn[W]);
+                this->channel[i].rfd = out[R];
+                close(in[W]);
             }
 
             if(0 < i && i < n - 1)
             {
-                server->connection[i]->rpipe = fdOut[R];
-                server->connection[i-1]->wpipe = fdIn[W];
+                this->channel[i].rfd = out[R];
+                this->channel[i - 1].wfd = in[W];
             }
-            
+
+            if(i == n - 1)
+            {
+                this->channel[i - 1].wfd = in[W];
+                close(out[R]);
+            }
+
         }
+    }
 
-        size /= 3;
+    this->maxfd = maxfd + 1;
 
-    }*/
+    for(i = 0; i < n - 1; i++)
+    {
 
-    return server;
+        size_t size = (size_t) 512 * pow(3, n - i);
+
+        size_t curSize = 0;
+
+        if(size == 0)
+            curSize = MB1;
+        else
+            curSize = min(size, MB1);
+      
+
+        this->channel[i].size = curSize;
+        this->channel[i].buf = (char*) calloc(curSize, sizeof(char));
+        this->channel[i].current = 0;
+
+        this->channel[i].start = this->channel[i].buf;
+
+        if(this->channel[i].buf == NULL)
+        {
+            fprintf(stderr, "Cant allocate for buffers\n");
+            
+            goto bufCallocError;
+        }
+    }
+
+    return this;
+
+    int k;
+bufCallocError:
+
+    for(k = 0; k < i; k++)
+        deleteChannel(&this->channel[k]);
+
+forkError:
+pipeError:    
+    
+    free(this->channel);
+
+channelCallocError:
+    
+    free(this);
+    return NULL;
+}
+
+int deleteServer(server_t* this)
+{
+    if(this == NULL)
+        return -1;
+    
+    if(this->mode == PARENT)
+    {   
+        long i;
+        for(i = 0; i < this->n - 1; i++)
+            deleteChannel(&this->channel[i]);
+
+    }
+
+    free(this->channel);
+    free(this);
+
+    return 0;
 }
 
 
+int startServer(server_t* server)
+{
+
+    int maxfd = server->maxfd;
+    long n = server->n;
+    long i;
+
+    
+    int passing = 1;
+
+    fd_set rfds;
+    fd_set wfds;
+
+    while(passing)
+    {
+        FD_ZERO(&rfds);
+        FD_ZERO(&wfds);
+        
+        passing = 0;
+        
+        
+        for(i = 0; i < n - 1; i++)
+        {
+            if( server->channel[i].rfd != CLOSED && 
+                server->channel[i].current == 0)
+            {
+                FD_SET(server->channel[i].rfd, &rfds);
+                passing++;
+            }
+
+            if( server->channel[i].wfd != CLOSED &&
+                server->channel[i].current != 0)
+            {
+                FD_SET(server->channel[i].wfd, &wfds);
+                passing++;
+            }
+                        
+        }
+
+        if(passing == 0)
+            break;
+
+        int ret = select(maxfd, &rfds, &wfds, NULL, NULL);
+        if(ret == -1)
+        {
+            perror(NULL);
+            fprintf(stderr, "select err\n");
+            return 0;
+        }
+
+        ssize_t nread = 0;  
+        
+        int k = 0;
+        for(i = 0; i < n - 1; i++)
+        {
+            if(FD_ISSET(server->channel[i].rfd, &rfds))
+            {
+                nread = read(   server->channel[i].rfd, 
+                                server->channel[i].buf,
+                                server->channel[i].size);
+
+                server->channel[i].current += nread;
 
 
-int main(int argc, char* argv[])
+                if(nread == 0)
+                {
+                    close(server->channel[i].rfd);
+                    close(server->channel[i].wfd);
+                    server->channel[i].wfd = CLOSED;
+                    server->channel[i].rfd = CLOSED;
+                }
+            }
+
+            if(FD_ISSET(server->channel[i].wfd, &wfds))
+            {
+
+                size_t nwrite = write(  server->channel[i].wfd,
+                                        server->channel[i].start,
+                                        server->channel[i].current);
+
+                if(nwrite < server->channel[i].current)
+                    server->channel[i].start += nwrite;
+                else
+                    server->channel[i].start = server->channel[i].buf;
+
+                server->channel[i].current -= nwrite;
+                
+            }
+        }
+
+
+    }
+
+
+    return 0;
+}
+
+
+int dealerAction(int rfd, int wfd)
+{
+    char buf[BUFSIZE];
+
+    int nread = 1;
+
+    while(nread > 0)
+    {
+        nread = read(rfd, buf, BUFSIZE);
+        
+        int nwrite = write(wfd, buf, nread);
+    }
+
+    return 0;
+}
+
+int dumpChannel(channel_t* channel)
+{
+    printf("rfd = %d, wfd = %d\n", channel->rfd, channel->wfd);
+    return 0;
+}
+
+int main (int argc, char* argv[])
 {
     int fd = 0;
     long n = handle(argc, argv, &fd);
 
+    server_t* server = createServer(n, fd);
+
+    if(server == NULL)
+        return 0;
     
+    if(server->mode == CHILD)
+    {
 
-    //printf("%d\n", ret);
+        int rfd = server->dealer.rfd;
+        int wfd = server->dealer.wfd;
 
-    close(fd);
+        deleteServer(server);
+
+        dealerAction(rfd, wfd);
+
+
+    }
+
+    else if(server->mode == PARENT)
+    {
+        startServer(server);
+        deleteServer(server);
+    }
+
     return 0;
 }
-
 
